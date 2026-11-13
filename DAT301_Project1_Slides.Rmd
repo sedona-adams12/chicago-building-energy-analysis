@@ -1,0 +1,190 @@
+---
+title: "How Efficient Is the Windy City?"
+subtitle: "A decade of energy use in Chicago's big buildings | DAT 301 Project 1"
+author: "Sedona Adams"
+date: "Fall 2026"
+output:
+  ioslides_presentation:
+    widescreen: true
+    smaller: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 4.6, fig.align = "center")
+library(tidyverse); library(scales); library(plotly); library(knitr)
+asu_maroon <- "#8C1D40"; asu_gold <- "#FFC627"; grey_dark <- "#5C6670"
+
+raw <- read_csv("Chicago_Energy_Benchmarking_20261029.csv",
+                col_types = cols(.default = col_character()), show_col_types = FALSE)
+
+energy <- raw %>%
+  rename(year = `Data Year`, id = ID, status = `Reporting Status`,
+         community_area = `Community Area`, property_type = `Primary Property Type`,
+         gfa = `Gross Floor Area - Buildings (sq ft)`, year_built = `Year Built`,
+         elec_kbtu = `Electricity Use (kBtu)`, gas_kbtu = `Natural Gas Use (kBtu)`,
+         steam_kbtu = `District Steam Use (kBtu)`, site_eui = `Site EUI (kBtu/sq ft)`,
+         wn_site_eui = `Weather Normalized Site EUI (kBtu/sq ft)`,
+         ghg = `Total GHG Emissions (Metric Tons CO2e)`,
+         ghg_intensity = `GHG Intensity (kg CO2e/sq ft)`) %>%
+  select(year, id, status, community_area, property_type, gfa, year_built,
+         elec_kbtu, gas_kbtu, steam_kbtu, site_eui, wn_site_eui, ghg, ghg_intensity) %>%
+  mutate(across(c(year, id, gfa, year_built, elec_kbtu, gas_kbtu, steam_kbtu,
+                  site_eui, wn_site_eui, ghg, ghg_intensity), parse_number)) %>%
+  mutate(status = case_when(status %in% c("Submitted", "Submitted Data") ~ "Submitted", TRUE ~ status),
+         property_type = replace_na(property_type, "Unknown"),
+         year_built = if_else(year_built < 1800 | year_built > year, NA_real_, year_built),
+         era = cut(year_built, breaks = c(0, 1900, 1945, 1975, 2000, Inf),
+                   labels = c("1900 & earlier", "1901-1945", "1946-1975", "1976-2000", "After 2000")))
+
+analysis <- energy %>%
+  filter(status == "Submitted", !is.na(site_eui), site_eui > 0, site_eui <= 500,
+         !is.na(gfa), gfa > 0)
+
+yearly <- analysis %>% group_by(year) %>%
+  summarise(median_eui = median(site_eui), median_ghgi = median(ghg_intensity, na.rm = TRUE), .groups = "drop")
+get_y <- function(col, yr) yearly[[col]][yearly$year == yr]
+```
+
+## The question
+
+**Chicago's big buildings must report their energy use every year. Are they actually getting more efficient?**
+
+* Data: Chicago Energy Benchmarking, City of Chicago Data Portal (`r comma(nrow(energy))` building-year records, 2014-2023)
+* Main measure: **Site EUI** = energy used per square foot per year
+* Four questions:
+    1. Is the improvement real?
+    2. Do older buildings waste more energy?
+    3. Did COVID change energy use, and did it last?
+    4. Which property types drive emissions?
+
+## Cleaning: what I fixed and why
+
+* Numbers were stored as **text with commas**, so I converted them
+* "Submitted" vs "Submitted Data" labels differ in 2020 and 2022, so I merged them (otherwise two years vanish)
+* Neighborhood names had **inconsistent capitalization**, so I standardized them
+* Extreme EUI values (up to **15,634**) were removed above 500 (`r comma(sum(energy$status == "Submitted" & energy$site_eui > 500, na.rm = TRUE))` records)
+* Created new variables: construction **era**, fuel **gas share**, size groups, COVID **period**
+* Final analysis set: **`r comma(nrow(analysis))`** submitted building-years
+
+## Q1: Median energy intensity fell, mostly in a step in 2020
+
+```{r q1}
+ggplot(yearly, aes(year, median_eui)) +
+  geom_line(colour = asu_maroon, linewidth = 1.4) +
+  geom_point(colour = asu_maroon, size = 3) +
+  scale_x_continuous(breaks = 2014:2023) +
+  labs(x = "Data year", y = "Median site EUI (kBtu per sq ft)",
+       title = "Median site EUI by year") +
+  theme_minimal(base_size = 15)
+```
+
+## Q1: The same buildings improved too
+
+```{r q1b}
+panel <- analysis %>% filter(year %in% c(2016, 2023)) %>%
+  select(id, year, site_eui) %>% group_by(id, year) %>% slice(1) %>% ungroup() %>%
+  pivot_wider(id_cols = id, names_from = year, values_from = site_eui, names_prefix = "eui_") %>%
+  drop_na(eui_2016, eui_2023) %>% mutate(improved = eui_2023 < eui_2016)
+
+ggplot(panel, aes(eui_2016, eui_2023, colour = improved)) +
+  geom_point(alpha = 0.4) + geom_abline(slope = 1, intercept = 0) +
+  scale_colour_manual(values = c("TRUE" = asu_maroon, "FALSE" = "grey60"), name = "Improved") +
+  coord_cartesian(xlim = c(0, 250), ylim = c(0, 250)) +
+  labs(x = "Site EUI 2016", y = "Site EUI 2023",
+       title = paste0(percent(mean(panel$improved), accuracy = 1), " of ", comma(nrow(panel)),
+                      " buildings improved")) +
+  theme_minimal(base_size = 15)
+```
+
+## Q1: Emissions fell even faster than energy use
+
+* Median energy intensity, 2019 to 2023: **`r percent(get_y("median_eui", 2023) / get_y("median_eui", 2019) - 1, accuracy = 0.1)`**
+* Median GHG intensity, 2019 to 2023: **`r percent(get_y("median_ghgi", 2023) / get_y("median_ghgi", 2019) - 1, accuracy = 0.1)`**
+* Likely reason: a **cleaner electricity grid** (a hypothesis, not tested in this dataset)
+* Takeaway: some emissions progress is not something building owners did
+
+## Q2: Age is not a simple story
+
+```{r q2}
+analysis %>% filter(!is.na(era)) %>%
+  ggplot(aes(era, site_eui, fill = era)) +
+  geom_boxplot(outlier.alpha = 0.15, show.legend = FALSE) +
+  stat_summary(fun = median, geom = "text", aes(label = round(after_stat(y), 0)),
+               vjust = -0.8, fontface = "bold") +
+  scale_fill_manual(values = c("#F2D7A0", "#E9B84F", asu_maroon, "#C4622D", grey_dark)) +
+  coord_cartesian(ylim = c(0, 220)) +
+  labs(x = "Era built", y = "Site EUI (kBtu per sq ft)",
+       title = "Mid-century (1946-1975) buildings are the energy hogs") +
+  theme_minimal(base_size = 15)
+```
+
+## Q3: COVID hit property types very differently
+
+```{r q3, fig.height=4.4}
+major_types <- c("Office", "Hotel", "College/University", "Retail Store", "K-12 School", "Multifamily Housing")
+covid <- analysis %>% filter(property_type %in% major_types, year >= 2016) %>%
+  group_by(property_type, year) %>% summarise(med = median(site_eui), .groups = "drop") %>%
+  group_by(property_type) %>% mutate(index = 100 * med / med[year == 2019]) %>% ungroup()
+
+ggplot(covid, aes(factor(year), property_type, fill = index)) +
+  geom_tile(colour = "white") + geom_text(aes(label = round(index, 0)), fontface = "bold") +
+  scale_fill_gradient2(low = "#2E7D9A", mid = "white", high = asu_maroon, midpoint = 100,
+                       name = "2019 = 100") +
+  labs(x = "Data year", y = NULL, title = "Offices dropped about 20% and never came back") +
+  theme_minimal(base_size = 14) + theme(panel.grid = element_blank())
+```
+
+## Q4: A few property types punch above their weight
+
+```{r q4}
+shares <- analysis %>% filter(year == 2023, !is.na(ghg), ghg >= 0) %>%
+  group_by(property_type) %>%
+  summarise(buildings = n(), floor_area = sum(gfa), emissions = sum(ghg), .groups = "drop") %>%
+  mutate(across(c(buildings, floor_area, emissions), ~ .x / sum(.x))) %>%
+  slice_max(emissions, n = 5) %>%
+  pivot_longer(-property_type, names_to = "measure", values_to = "share") %>%
+  mutate(measure = factor(measure, levels = c("buildings", "floor_area", "emissions"),
+                          labels = c("Share of buildings", "Share of floor area", "Share of emissions")),
+         property_type = fct_reorder(str_wrap(property_type, 18), share, .fun = max))
+
+ggplot(shares, aes(property_type, share, fill = measure)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75) + coord_flip() +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("grey70", asu_gold, asu_maroon), name = NULL) +
+  labs(x = NULL, y = "Share of reporting buildings (2023)",
+       title = "Hospitals: tiny share of buildings, large share of emissions") +
+  theme_minimal(base_size = 14) + theme(legend.position = "bottom")
+```
+
+## Interactive map
+
+```{r map, fig.height=5}
+map_df <- analysis %>% filter(year == 2023) %>%
+  left_join(raw %>% transmute(id = parse_number(ID), year = parse_number(`Data Year`),
+                              lat = parse_number(Latitude), lon = parse_number(Longitude),
+                              property_name = `Property Name`),
+            by = c("id", "year")) %>%
+  filter(!is.na(lat), !is.na(lon), lat > 41.6, lat < 42.1, lon > -88, lon < -87.5) %>%
+  mutate(eui_capped = pmin(site_eui, 200),
+         tip = paste0(coalesce(property_name, "Unnamed building"), "<br>", property_type,
+                      "<br>EUI: ", round(site_eui, 1)))
+p <- ggplot(map_df, aes(lon, lat, colour = eui_capped, text = tip)) +
+  geom_point(size = 1.2, alpha = 0.75) +
+  scale_colour_viridis_c(option = "magma", direction = -1, name = "Site EUI") +
+  coord_fixed(1.3) + labs(x = "Longitude", y = "Latitude") + theme_minimal(base_size = 12)
+ggplotly(p, tooltip = "text")
+```
+
+## Conclusions
+
+* **Real progress, with caveats:** the same buildings improved, but much of the drop arrives as a 2020 step
+* **Age is U-shaped:** mid-century buildings are the best retrofit target
+* **Not every drop is efficiency:** half-empty offices use less energy per sq ft
+* **Emissions are concentrated:** prioritize by emissions, not building count
+* **Electrification** matters most for older housing and schools (gas heavy)
+* Limitations: only reporting buildings, COVID confounding, grid effect is a hypothesis
+
+## Thank you! Questions?
+
+*If you ever find yourself in a half-empty Loop office building in January, remember: it is still heated, and it still shows up in the data.*

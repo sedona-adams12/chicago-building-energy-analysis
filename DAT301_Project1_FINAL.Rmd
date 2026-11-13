@@ -1,0 +1,946 @@
+---
+title: "How Efficient Is the Windy City? A Decade of Energy Use in Chicago's Big Buildings"
+subtitle: "DAT 301 - Project 1 (Individual Data Science Project)"
+author: "Sedona Adams"
+date: "Fall 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 8, fig.height = 5, fig.align = "center")
+library(tidyverse)   # dplyr, ggplot2, stringr, forcats, readr, tidyr
+library(scales)
+library(plotly)      # interactive map
+library(knitr)
+
+asu_maroon <- "#8C1D40"
+asu_gold   <- "#FFC627"
+grey_dark  <- "#5C6670"
+```
+
+# 1. Background, Motivation, and Research Questions
+
+```{r pictures, echo=FALSE, out.width="70%"}
+# Optional: save a Chicago skyline photo or meme as "chicago_skyline.jpg" in this folder.
+if (file.exists("chicago_skyline.jpg")) knitr::include_graphics("chicago_skyline.jpg")
+```
+
+## 1.1 Why buildings?
+
+When people think about climate change, they picture cars, power plants, and
+airplanes. In big cities like Chicago, though, the **buildings themselves** are
+one of the largest sources of greenhouse gas emissions. Every office tower,
+apartment complex, school, and hospital burns natural gas for heat and draws
+electricity for lights, elevators, and air conditioning. Chicago's winters
+(think *Polar Vortex*, not *Cloud Gate selfie weather*) make heating especially
+energy hungry. If a city wants to cut emissions, it has to understand how its
+buildings use energy: which ones are efficient, which ones are wasteful, and
+whether things are improving.
+
+To get that information, the City of Chicago passed the **Chicago Energy
+Benchmarking Ordinance**. Owners of large buildings (generally those over
+50,000 square feet) must report their annual energy use to the city, and the
+city publishes the results on the Chicago Data Portal. That makes this one of
+the richest public datasets about how a major American city actually consumes
+energy.
+
+## 1.2 Why this topic matters to me
+
+I picked this dataset from the open data portals list (Chicago is on it) for
+three reasons. First, it is *real* and *messy*, with ten years of reports, many
+missing values, numbers stored as text with commas, and some wildly implausible
+entries. That is exactly the kind of data I will meet in a job. Second, it
+connects data science to something that matters: energy efficiency is one of the
+few climate levers a city can pull directly. Third, I am curious about a
+question that sounds simple but is not: **are buildings actually getting
+better, or do the statistics just make it look that way?**
+
+## 1.3 The dataset
+
+The data come from the **Chicago Energy Benchmarking** dataset on the City of
+Chicago Data Portal (data.cityofchicago.org), downloaded as
+`Chicago_Energy_Benchmarking_20261029.csv`. Each row is one building (or
+property) in one reporting year, so the same building appears many times. The
+file covers data years **2014 to 2023**.
+
+The variables most important to my analysis are:
+
+| Variable | Meaning |
+|----------|---------|
+| `Data Year` | The year the energy use was measured (2014-2023) |
+| `ID` | A building identifier that lets me follow the same building across years |
+| `Reporting Status` | Whether the owner submitted data, was exempt, or did not submit |
+| `Primary Property Type` | Multifamily housing, office, school, hotel, hospital, and so on |
+| `Year Built` | Construction year of the building |
+| `Gross Floor Area - Buildings (sq ft)` | Size of the building |
+| `Site EUI (kBtu/sq ft)` | **Energy Use Intensity**: energy used on-site per square foot per year. This is the main efficiency measure, because it adjusts for building size |
+| `Weather Normalized Site EUI` | The same measure, adjusted for how hot or cold the year was |
+| `Electricity`, `Natural Gas`, `District Steam Use (kBtu)` | Energy consumed by fuel type |
+| `Total GHG Emissions` and `GHG Intensity (kg CO2e/sq ft)` | Greenhouse gas emissions, total and per square foot |
+| `ENERGY STAR Score` and `Chicago Energy Rating` | Performance scores (1-100 and 1-4 stars) |
+| `Community Area`, `Latitude`, `Longitude` | Location within Chicago |
+
+A note on the main measure: **EUI** is "energy per square foot." A huge building
+can use enormous total energy and still be efficient per square foot, while a
+tiny building can be wasteful. Using EUI lets me compare apples to apples.
+
+## 1.4 Research questions
+
+1. **Progress:** Has the energy intensity of Chicago's large buildings really
+   fallen since 2014? And is the improvement real, or does it come from
+   changes in *which* buildings report, or from weather?
+2. **Age:** Do older buildings use more energy per square foot than newer ones?
+   (It sounds obvious. I suspect it is more complicated.)
+3. **COVID-19:** Did the pandemic change energy use differently for different
+   kinds of buildings, and did the change last?
+4. **Emissions:** Which property types contribute the most to the city's
+   building emissions *relative to how many buildings they represent*? What
+   role does the fuel mix (natural gas vs. electricity) play?
+
+## 1.5 What I hope to learn
+
+I expect to find that average efficiency improved, but I want to test whether
+that improvement is *genuine* by following the **same buildings** over time. I
+expect old buildings to be wasteful, but I want to see whether the data agree. I
+expect offices to have been hit hard by the pandemic, and I want to know
+whether they bounced back. Finally, I want to learn where a policymaker should
+focus: on many small contributors or a few giants.
+
+# 2. Data Wrangling and Cleaning
+
+## 2.1 Reading the file and first impressions
+
+I read every column as text first. This is on purpose. When I opened the file, I
+noticed that numeric columns such as floor area and electricity use contain
+**commas** (for example `65,250`), so R would otherwise either misread them or
+treat them as text. Reading everything as text lets me control exactly how each
+column is converted.
+
+```{r read}
+raw <- read_csv("Chicago_Energy_Benchmarking_20261029.csv",
+                col_types = cols(.default = col_character()),
+                show_col_types = FALSE)
+
+cat("Rows:", nrow(raw), " Columns:", ncol(raw), "\n")
+glimpse(raw[, 1:12])
+```
+
+## 2.2 Problems found and how I fixed them
+
+| Problem found | Why it matters | What I did |
+|---------------|----------------|-----------|
+| Column names are long and contain spaces and symbols (`Site EUI (kBtu/sq ft)`) | Hard to type and error prone | Renamed to short snake_case names and kept only the columns I need |
+| Numbers stored as text with commas (`65,250`) | Cannot compute averages on text | Converted with `parse_number()` |
+| **Reporting status labels changed between years**: 2020 and 2022 use "Submitted Data" while other years use "Submitted" | Filtering on one label would silently throw away two whole years | Merged both labels into a single `Submitted` category |
+| Many rows have no data (not submitted, exempt, not covered) | Their energy columns are empty, so they would distort every summary | Kept them to study reporting, but excluded them from the efficiency analysis |
+| **Community area names have inconsistent capitalization** (`NEAR WEST SIDE` and `Near West Side`) | The same neighborhood would be counted as two | Converted to upper case and trimmed whitespace |
+| `Chicago Energy Rating` uses `0` for "not rated" | A 0 would look like the worst possible rating | Recoded 0 as missing |
+| Extreme EUI values (some above 1,000 kBtu/sq ft, one above 15,000) | A few typos or special facilities can dominate averages and wreck every graph | Excluded EUI values at or below zero and above 500, and documented how many were removed |
+| Impossible or suspicious years built | Would distort the age analysis | Set to missing if before 1800 or later than the data year |
+| Negative fuel use values (credits or corrections) | Cannot compute a fuel share from a negative energy use | Treated negatives as zero when computing fuel mix |
+
+```{r clean}
+energy <- raw %>%
+  rename(
+    year          = `Data Year`,
+    id            = ID,
+    property_name = `Property Name`,
+    status        = `Reporting Status`,
+    chicago_rating = `Chicago Energy Rating`,
+    community_area = `Community Area`,
+    property_type = `Primary Property Type`,
+    gfa           = `Gross Floor Area - Buildings (sq ft)`,
+    year_built    = `Year Built`,
+    energy_star   = `ENERGY STAR Score`,
+    elec_kbtu     = `Electricity Use (kBtu)`,
+    gas_kbtu      = `Natural Gas Use (kBtu)`,
+    steam_kbtu    = `District Steam Use (kBtu)`,
+    site_eui      = `Site EUI (kBtu/sq ft)`,
+    wn_site_eui   = `Weather Normalized Site EUI (kBtu/sq ft)`,
+    ghg           = `Total GHG Emissions (Metric Tons CO2e)`,
+    ghg_intensity = `GHG Intensity (kg CO2e/sq ft)`,
+    lat           = Latitude,
+    lon           = Longitude
+  ) %>%
+  select(year, id, property_name, status, chicago_rating, community_area,
+         property_type, gfa, year_built, energy_star, elec_kbtu, gas_kbtu,
+         steam_kbtu, site_eui, wn_site_eui, ghg, ghg_intensity, lat, lon) %>%
+  # (1) text -> numbers (parse_number understands commas)
+  mutate(across(c(year, id, chicago_rating, gfa, year_built, energy_star,
+                  elec_kbtu, gas_kbtu, steam_kbtu, site_eui, wn_site_eui,
+                  ghg, ghg_intensity, lat, lon), parse_number)) %>%
+  mutate(
+    # (2) one consistent label for submitted data
+    status = case_when(status %in% c("Submitted", "Submitted Data") ~ "Submitted",
+                       TRUE ~ status),
+    # (3) consistent neighborhood names
+    community_area = str_to_upper(str_squish(community_area)),
+    # (4) 0 means "not rated", not "worst rating"
+    chicago_rating = if_else(chicago_rating == 0, NA_real_, chicago_rating),
+    # (5) combine two names for the same kind of property
+    property_type = case_when(
+      property_type %in% c("Senior Care Community", "Senior Living Community") ~ "Senior Living/Care",
+      is.na(property_type) ~ "Unknown",
+      TRUE ~ property_type),
+    # (6) implausible construction years become missing
+    year_built = if_else(year_built < 1800 | year_built > year, NA_real_, year_built)
+  )
+
+glimpse(energy)
+```
+
+## 2.3 Creating new variables
+
+Raw columns are not enough to answer my questions, so I engineered several new
+ones:
+
+* **`era`**: the construction period (1900 and earlier, 1901-1945, 1946-1975,
+  1976-2000, after 2000). Grouping years into eras makes age patterns readable,
+  and the cut points roughly follow major shifts in how American buildings were
+  built (pre-war masonry, post-war mass construction, modern energy codes).
+* **`size_class`**: building size in five equal-sized groups (quintiles), used
+  to check whether bigger buildings are more or less efficient.
+* **`gas_share`**: the fraction of a building's energy that comes from natural
+  gas. This tells me how dependent a building is on fossil fuel heating.
+* **`period`**: before COVID (up to 2019), the pandemic years (2020-2021), and
+  after (2022-2023), used to summarize the pandemic's effect.
+
+```{r new-vars}
+energy <- energy %>%
+  mutate(
+    era = cut(year_built,
+              breaks = c(0, 1900, 1945, 1975, 2000, Inf),
+              labels = c("1900 & earlier", "1901-1945", "1946-1975",
+                         "1976-2000", "After 2000")),
+    size_class = cut(gfa,
+                     breaks = quantile(gfa, probs = seq(0, 1, 0.2), na.rm = TRUE),
+                     include.lowest = TRUE,
+                     labels = c("Smallest 20%", "Small", "Medium", "Large", "Largest 20%")),
+    period = case_when(year <= 2019 ~ "Before COVID",
+                       year <= 2021 ~ "Pandemic years",
+                       TRUE ~ "After COVID") %>%
+             factor(levels = c("Before COVID", "Pandemic years", "After COVID"))
+  )
+
+# Fuel mix: negative values are treated as zero, missing as zero
+energy <- energy %>%
+  mutate(
+    e = pmax(coalesce(elec_kbtu, 0), 0),
+    g = pmax(coalesce(gas_kbtu, 0), 0),
+    s = pmax(coalesce(steam_kbtu, 0), 0),
+    fuel_total = e + g + s,
+    gas_share = if_else(fuel_total > 0, g / fuel_total, NA_real_)
+  ) %>%
+  select(-e, -g, -s)
+```
+
+## 2.4 Who reports? Missing data and reporting status
+
+Before analyzing efficiency, I need to understand how much of the data is
+actually usable. Many rows are for buildings that never submitted data.
+
+```{r fig-status, fig.cap="Figure 1: Reporting status of buildings by year"}
+energy %>%
+  count(year, status) %>%
+  group_by(year) %>% mutate(share = n / sum(n)) %>% ungroup() %>%
+  mutate(status = factor(status, levels = c("Submitted", "Exempt",
+                                            "Not Covered 2024", "Not Submitted"))) %>%
+  ggplot(aes(factor(year), share, fill = status)) +
+  geom_col(width = 0.8) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Submitted" = asu_maroon, "Exempt" = asu_gold,
+                               "Not Covered 2024" = "grey70",
+                               "Not Submitted" = grey_dark), name = NULL) +
+  labs(title = "Reporting grew quickly, then compliance gaps appeared",
+       subtitle = "Share of listed buildings by reporting status and data year",
+       x = "Data year", y = "Share of buildings") +
+  theme_minimal(base_size = 13) + theme(legend.position = "bottom")
+```
+
+**What to notice:** In the first years, every record in the file is a
+submitted report. From 2018 on, the file also lists buildings that were exempt
+or **did not submit** at all (the gray and dark bars). This matters for a
+fair analysis because the buildings that report are not necessarily
+representative of all buildings. The 2014 and 2015 years also cover far fewer
+buildings, since the program was still ramping up, so I will treat those two
+years with caution.
+
+## 2.5 Building the analysis dataset
+
+I now create the dataset used for all efficiency questions. Each filter has a
+reason, and I count how many rows each step removes.
+
+```{r analysis-set}
+analysis <- energy %>%
+  filter(status == "Submitted",
+         !is.na(site_eui), site_eui > 0, site_eui <= 500,
+         !is.na(gfa), gfa > 0)
+
+steps <- tibble(
+  step = c("All rows in the file",
+           "Keep only submitted reports",
+           "...with a recorded EUI",
+           "...with EUI between 0 and 500",
+           "...with a known floor area (final analysis set)"),
+  rows = c(nrow(energy),
+           sum(energy$status == "Submitted"),
+           sum(energy$status == "Submitted" & !is.na(energy$site_eui)),
+           sum(energy$status == "Submitted" & !is.na(energy$site_eui) &
+                 energy$site_eui > 0 & energy$site_eui <= 500),
+           nrow(analysis))
+)
+steps %>% mutate(rows = comma(rows)) %>% kable(caption = "Rows remaining after each cleaning step")
+```
+
+```{r extreme-check}
+extreme <- energy %>% filter(status == "Submitted", site_eui > 500)
+cat("Submitted records with EUI above 500:", nrow(extreme), "\n")
+cat("Largest EUI value in the file:", comma(max(energy$site_eui, na.rm = TRUE)), "kBtu/sq ft\n")
+cat("Median EUI of the analysis set:", round(median(analysis$site_eui), 1), "kBtu/sq ft\n")
+```
+
+**Why 500?** Typical large buildings in this data use roughly 60 to 100 kBtu
+per square foot. A value above 500 usually reflects a data-entry error, a
+tiny floor area reported incorrectly, or an unusual facility such as a data
+center. These records are a very small fraction of the data, but because one
+15,000-unit value can drag an average far from reality, removing them makes
+every comparison more trustworthy. I use **medians** throughout so that the
+analysis is robust even to the extremes that remain.
+
+## 2.6 A first look at the distribution
+
+```{r fig-hist, fig.cap="Figure 2: Distribution of site EUI (log scale)"}
+ggplot(analysis, aes(site_eui)) +
+  geom_histogram(bins = 60, fill = asu_maroon, colour = "white") +
+  geom_vline(xintercept = median(analysis$site_eui), colour = asu_gold,
+             linewidth = 1.3) +
+  annotate("text", x = median(analysis$site_eui) * 1.15, y = Inf,
+           label = paste0("Median = ", round(median(analysis$site_eui), 1)),
+           vjust = 2, hjust = 0, fontface = "bold") +
+  scale_x_log10(breaks = c(10, 30, 100, 300)) +
+  labs(title = "Most buildings use between roughly 50 and 120 kBtu per square foot",
+       subtitle = "Histogram of site EUI, all submitted building-years (log scale)",
+       x = "Site EUI (kBtu per sq ft per year, log scale)", y = "Number of building-years") +
+  theme_minimal(base_size = 13)
+```
+
+**What to notice:** The distribution is **right-skewed**: most buildings
+cluster around the median, but a long tail of energy-hungry buildings stretches
+toward the right. I use a logarithmic axis so that the tail does not squash the
+main body. The skew is the reason I use medians instead of means in this
+project.
+
+# 3. Exploratory Data Analysis
+
+```{r key-numbers, include=FALSE}
+yearly <- analysis %>%
+  group_by(year) %>%
+  summarise(n = n(),
+            median_eui = median(site_eui),
+            q1 = quantile(site_eui, 0.25),
+            q3 = quantile(site_eui, 0.75),
+            median_wn = median(wn_site_eui, na.rm = TRUE),
+            median_ghgi = median(ghg_intensity, na.rm = TRUE),
+            .groups = "drop")
+
+get_y <- function(col, yr) yearly[[col]][yearly$year == yr]
+```
+
+## 3.1 Question 1: Are Chicago's buildings really getting more efficient?
+
+**Why this is not obvious:** A falling average could be caused by several
+things that are *not* real improvement: a mild year, a pandemic, or a
+different set of buildings reporting each year. To separate real progress from
+illusion, I do two checks. First I look at the yearly trend, with and without
+weather adjustment. Then I follow **the same buildings** from 2016 to 2023.
+
+### Step 1: the yearly trend
+
+```{r fig-trend, fig.cap="Figure 3: Median site EUI by year"}
+trend_long <- yearly %>%
+  select(year, `Reported EUI` = median_eui, `Weather-normalized EUI` = median_wn) %>%
+  pivot_longer(-year, names_to = "measure", values_to = "eui")
+
+ggplot() +
+  geom_ribbon(data = yearly, aes(year, ymin = q1, ymax = q3),
+              fill = asu_gold, alpha = 0.35) +
+  geom_line(data = trend_long, aes(year, eui, colour = measure, linetype = measure),
+            linewidth = 1.3) +
+  geom_point(data = trend_long, aes(year, eui, colour = measure), size = 2.5) +
+  scale_colour_manual(values = c("Reported EUI" = asu_maroon,
+                                 "Weather-normalized EUI" = grey_dark), name = NULL) +
+  scale_linetype_manual(values = c("Reported EUI" = "solid",
+                                   "Weather-normalized EUI" = "dashed"), name = NULL) +
+  scale_x_continuous(breaks = 2014:2023) +
+  labs(title = "Median energy intensity fell, but mostly in a step after 2019",
+       subtitle = "Gold band = middle 50% of buildings (25th to 75th percentile)",
+       x = "Data year", y = "Site EUI (kBtu per sq ft per year)") +
+  theme_minimal(base_size = 13) + theme(legend.position = "bottom")
+```
+
+**Evidence:** The reported median EUI was about
+`r round(get_y("median_eui", 2018), 1)` in 2018 and
+`r round(get_y("median_eui", 2023), 1)` in 2023, a drop of roughly
+`r percent(1 - get_y("median_eui", 2023) / get_y("median_eui", 2018), accuracy = 1)`.
+The weather-normalized line (dashed) fell by less, from about
+`r round(get_y("median_wn", 2019), 1)` in 2019 to
+`r round(get_y("median_wn", 2023), 1)` in 2023 (roughly
+`r percent(1 - get_y("median_wn", 2023) / get_y("median_wn", 2019), accuracy = 1)`),
+so **part** of the reported drop reflects weather and part reflects a genuine
+change in how much energy buildings need. But look at the *shape*: the line is fairly flat from 2015 to
+2019 and then **drops sharply in 2020**, the first pandemic year, instead of
+declining steadily. A steady retrofit-driven improvement would look like a
+smooth slope. A step down at 2020 suggests the pandemic had something to do
+with it.
+
+### Step 2: following the same buildings
+
+The yearly medians compare *different* groups of buildings each year. Buildings
+that appear in both 2016 and 2023 give a cleaner test, because the building mix
+cannot change.
+
+```{r panel}
+panel <- analysis %>%
+  filter(year %in% c(2016, 2023)) %>%
+  select(id, year, site_eui) %>%
+  group_by(id, year) %>% slice(1) %>% ungroup() %>%
+  pivot_wider(id_cols = id, names_from = year, values_from = site_eui,
+              names_prefix = "eui_") %>%
+  drop_na(eui_2016, eui_2023) %>%
+  mutate(change = eui_2023 - eui_2016,
+         pct_change = change / eui_2016,
+         improved = change < 0)
+
+panel_n <- nrow(panel)
+panel_med <- median(panel$change)
+panel_pct <- mean(panel$improved)
+```
+
+```{r fig-panel, fig.cap="Figure 4: Same buildings, 2016 vs. 2023"}
+ggplot(panel, aes(eui_2016, eui_2023, colour = improved)) +
+  geom_point(alpha = 0.4, size = 1.6) +
+  geom_abline(slope = 1, intercept = 0, linewidth = 1, colour = "black") +
+  scale_colour_manual(values = c("TRUE" = asu_maroon, "FALSE" = "grey60"),
+                      labels = c("TRUE" = "Improved (EUI fell)", "FALSE" = "Same or worse"),
+                      name = NULL) +
+  coord_cartesian(xlim = c(0, 250), ylim = c(0, 250)) +
+  labs(title = "Most of the same buildings use less energy per square foot than in 2016",
+       subtitle = paste0(comma(panel_n), " buildings reported in both years; points below the line improved"),
+       x = "Site EUI in 2016 (kBtu per sq ft)", y = "Site EUI in 2023 (kBtu per sq ft)") +
+  theme_minimal(base_size = 13) + theme(legend.position = "bottom")
+```
+
+**Evidence:** Among the `r comma(panel_n)` buildings that reported in both
+years, the **median change was `r round(panel_med, 1)` kBtu per square foot**,
+and `r percent(panel_pct, accuracy = 1)` of them improved. So the
+improvement is **real at the building level** and not just a statistical
+artifact of who reports. Still, the pandemic reduced occupancy and that may
+have helped many of these buildings, so I cannot attribute the whole gain to
+efficiency upgrades. This leads directly to Question 3.
+
+**Answer to Question 1:** Yes, but with caveats. The improvement is real for the
+same buildings over time, yet a good share of the headline drop comes from the
+pandemic year and from weather.
+
+### Step 3: emissions fell even faster
+
+```{r ghg-compare}
+ghgi_2019 <- get_y("median_ghgi", 2019)
+ghgi_2023 <- get_y("median_ghgi", 2023)
+eui_2019  <- get_y("median_eui", 2019)
+eui_2023  <- get_y("median_eui", 2023)
+tibble(
+  measure = c("Median site EUI", "Median GHG intensity (kg CO2e/sq ft)"),
+  `2019` = round(c(eui_2019, ghgi_2019), 2),
+  `2023` = round(c(eui_2023, ghgi_2023), 2),
+  `Change` = percent(c(eui_2023 / eui_2019 - 1, ghgi_2023 / ghgi_2019 - 1), accuracy = 0.1)
+) %>% kable(caption = "Energy intensity vs. emissions intensity, 2019 to 2023")
+```
+
+**Interpretation:** Greenhouse gas intensity fell by a larger percentage than
+energy intensity. That is a non-obvious result: it means buildings are cutting
+emissions *faster than they are cutting energy use*. A likely explanation is
+that **the electricity grid itself got cleaner**, as the Midwest retired coal
+plants and added wind and nuclear power, so the same kilowatt-hour now causes
+fewer emissions. Part of the emissions progress, then, is not something
+building owners did. (I cannot test this directly with this dataset, since it
+has no grid-emissions variable, so I treat it as an informed hypothesis.)
+
+## 3.2 Question 2: Do older buildings really use more energy?
+
+**Why this is not obvious:** Common sense says that old buildings leak heat
+and waste energy, so energy use per square foot should rise with age. Let's
+check.
+
+```{r age-cor}
+cor_age  <- cor(analysis$site_eui, analysis$year_built, use = "complete.obs", method = "spearman")
+cor_size <- cor(analysis$site_eui, analysis$gfa, use = "complete.obs", method = "spearman")
+
+era_summary <- analysis %>%
+  filter(!is.na(era)) %>%
+  group_by(era) %>%
+  summarise(buildings = n(),
+            median_eui = round(median(site_eui), 1),
+            median_gas_share = percent(median(gas_share, na.rm = TRUE), accuracy = 1),
+            .groups = "drop")
+
+cat("Spearman correlation, EUI vs. year built:", round(cor_age, 3), "\n")
+cat("Spearman correlation, EUI vs. floor area:", round(cor_size, 3), "\n")
+era_summary %>% kable(caption = "Energy intensity by construction era")
+```
+
+```{r size-table}
+analysis %>%
+  filter(!is.na(size_class)) %>%
+  group_by(size_class) %>%
+  summarise(building_years = n(), median_eui = round(median(site_eui), 1), .groups = "drop") %>%
+  kable(caption = "Energy intensity by building size (quintiles of floor area)")
+```
+
+Bigger buildings are slightly more efficient per square foot, but the
+differences are small compared with the differences between property types.
+The rank correlation between year built and EUI is essentially **zero**
+(`r round(cor_age, 3)`), and the correlation with building size is also
+negligible (`r round(cor_size, 3)`). If age were a simple driver of waste, I
+would see a clear trend. But a correlation coefficient only captures *straight
+line* relationships. Let me look at the whole picture.
+
+```{r fig-era, fig.cap="Figure 5: Energy intensity by construction era"}
+analysis %>%
+  filter(!is.na(era)) %>%
+  ggplot(aes(era, site_eui, fill = era)) +
+  geom_boxplot(outlier.alpha = 0.15, show.legend = FALSE) +
+  stat_summary(fun = median, geom = "text", aes(label = round(after_stat(y), 0)),
+               vjust = -0.8, fontface = "bold", size = 4) +
+  scale_fill_manual(values = c("#F2D7A0", "#E9B84F", asu_maroon, "#C4622D", grey_dark)) +
+  coord_cartesian(ylim = c(0, 220)) +
+  labs(title = "Mid-century buildings are the energy hogs, not the oldest ones",
+       subtitle = "Site EUI by construction era (number above each box = median)",
+       x = "Era built", y = "Site EUI (kBtu per sq ft per year)") +
+  theme_minimal(base_size = 13)
+```
+
+**Evidence and interpretation:** The relationship is **U-shaped, not
+linear**. Buildings from **1946 to 1975** have the highest median EUI. The very
+oldest buildings (1900 and earlier) and buildings built after 2000 use *less*
+energy per square foot. Why would a 120-year-old building beat a 1960s one? A
+plausible explanation is that pre-war buildings often have thick masonry walls
+and small windows, and the ones that survive are typically well-maintained and
+have been renovated. Mid-century construction was built quickly and cheaply,
+with thin walls, single-pane glass, and little insulation, before modern energy
+codes existed. The post-2000 buildings benefit from those codes. This also
+suggests a policy implication: the 1946-1975 stock is the best target for
+retrofits.
+
+**Answer to Question 2:** No, not in a simple way. Age on its own is a poor
+predictor. Mid-century buildings are the least efficient, and both the oldest
+and the newest buildings do better.
+
+One more check: the age pattern could simply reflect different kinds of
+buildings in each era. Let me look within two major property types.
+
+```{r fig-era-type, fig.cap="Figure 6: Age pattern within Multifamily and Office buildings"}
+analysis %>%
+  filter(property_type %in% c("Multifamily Housing", "Office"), !is.na(era)) %>%
+  group_by(property_type, era) %>%
+  summarise(median_eui = median(site_eui), n = n(), .groups = "drop") %>%
+  ggplot(aes(era, median_eui, colour = property_type, group = property_type)) +
+  geom_line(linewidth = 1.3) +
+  geom_point(aes(size = n)) +
+  scale_colour_manual(values = c("Multifamily Housing" = asu_maroon, "Office" = "#2E7D9A"),
+                      name = NULL) +
+  scale_size_continuous(range = c(2, 7), name = "Buildings") +
+  labs(title = "The mid-century bump shows up inside each property type",
+       subtitle = "Median site EUI by era; point size = number of building-years",
+       x = "Era built", y = "Median site EUI (kBtu per sq ft)") +
+  theme_minimal(base_size = 13) + theme(legend.position = "bottom")
+```
+
+**What to notice:** For both multifamily housing and offices, the 1946-1975
+group has the highest median, so the era effect is not simply an artifact of
+building mix. The point sizes are a reminder that the oldest eras contain far
+fewer observations, so those medians are less certain.
+
+## 3.3 Question 3: Did COVID-19 change energy use differently for different buildings, and did it last?
+
+**Why this is not obvious:** The pandemic emptied offices and hotels, so I
+expect their energy use to drop. The interesting question is whether things
+**went back to normal** afterwards, and whether the drop was the same everywhere.
+
+To compare different property types fairly, I convert each type's median EUI
+into an **index where 2019 = 100**. A value of 80 means 20% less energy per
+square foot than in 2019.
+
+```{r covid}
+major_types <- c("Office", "Hotel", "College/University", "Retail Store",
+                 "K-12 School", "Multifamily Housing")
+
+covid <- analysis %>%
+  filter(property_type %in% major_types, year >= 2016) %>%
+  group_by(property_type, year) %>%
+  summarise(med = median(site_eui), n = n(), .groups = "drop") %>%
+  group_by(property_type) %>%
+  mutate(index = 100 * med / med[year == 2019]) %>%
+  ungroup()
+
+idx <- function(type, yr) round(covid$index[covid$property_type == type & covid$year == yr], 0)
+```
+
+```{r fig-covid, fig.width=9, fig.height=5, fig.cap="Figure 7: Energy intensity index by property type (2019 = 100)"}
+covid %>%
+  mutate(property_type = factor(property_type,
+                                levels = rev(c("Office", "Hotel", "College/University",
+                                               "Retail Store", "K-12 School",
+                                               "Multifamily Housing")))) %>%
+  ggplot(aes(factor(year), property_type, fill = index)) +
+  geom_tile(colour = "white", linewidth = 0.8) +
+  geom_text(aes(label = round(index, 0)), size = 3.8, fontface = "bold") +
+  scale_fill_gradient2(low = "#2E7D9A", mid = "white", high = asu_maroon,
+                       midpoint = 100, name = "Index\n(2019 = 100)") +
+  labs(title = "Offices and hotels dropped hardest in 2020; offices never came back",
+       subtitle = "Median site EUI as an index of each property type's 2019 level",
+       x = "Data year", y = NULL) +
+  theme_minimal(base_size = 13) + theme(panel.grid = element_blank())
+```
+
+**Evidence and interpretation:** In 2020, the **office** index fell to about
+`r idx("Office", 2020)`, and in 2023 it was still about `r idx("Office", 2023)`.
+That means the drop was **not temporary**. Offices still use roughly a
+fifth less energy per square foot than before the pandemic, which is consistent
+with remote and hybrid work that left buildings partly empty (and with lower
+lighting, computing, and ventilation loads). **Hotels** followed a different
+path: their index fell to about `r idx("Hotel", 2020)` in 2020, but climbed back
+to about `r idx("Hotel", 2023)` by 2023 as travel returned (a partial recovery,
+still below 2019). **K-12 schools**
+barely moved, which makes sense because school buildings kept heating and
+ventilating even when classes were remote, and their energy use depends mainly
+on weather and building systems. **Multifamily** housing declined slowly and
+steadily, which looks more like gradual efficiency gains than a pandemic shock,
+because people's homes stay occupied regardless.
+
+```{r period-table}
+analysis %>%
+  filter(property_type %in% major_types) %>%
+  group_by(property_type, period) %>%
+  summarise(median_eui = round(median(site_eui), 1), .groups = "drop") %>%
+  pivot_wider(names_from = period, values_from = median_eui) %>%
+  kable(caption = "Median site EUI by property type and COVID period")
+```
+
+The table puts the heatmap into plain numbers: offices are far lower after COVID
+than before, while schools barely change.
+
+**Answer to Question 3:** Yes. The pandemic affected property types very
+differently, and the change was lasting for offices but only partial for hotels.
+
+This changes my reading of Question 1. A large part of the 2020 step down is
+tied to **how buildings are used**, not just how well they are built. A lower
+EUI in an empty office building is not necessarily a sign of better efficiency,
+and it is a reminder that EUI measures energy per square foot, not energy per
+person served.
+
+## 3.4 Question 4: Which property types drive emissions, and what is the role of fuel?
+
+**Why this is not obvious:** It would be natural to assume emissions are
+proportional to the number of buildings. But a hospital is not a house.
+
+```{r shares}
+latest <- analysis %>% filter(year == 2023, !is.na(ghg), ghg >= 0)
+
+shares <- latest %>%
+  group_by(property_type) %>%
+  summarise(buildings = n(), floor_area = sum(gfa), emissions = sum(ghg),
+            .groups = "drop") %>%
+  mutate(across(c(buildings, floor_area, emissions), ~ .x / sum(.x))) %>%
+  slice_max(emissions, n = 6)
+
+shares_long <- shares %>%
+  pivot_longer(-property_type, names_to = "measure", values_to = "share") %>%
+  mutate(measure = factor(measure,
+                          levels = c("buildings", "floor_area", "emissions"),
+                          labels = c("Share of buildings", "Share of floor area",
+                                     "Share of emissions")),
+         property_type = fct_reorder(str_wrap(property_type, 18), share, .fun = max))
+
+get_share <- function(type, col) shares[[col]][shares$property_type == type]
+```
+
+```{r fig-shares, fig.width=9, fig.height=5.5, fig.cap="Figure 8: Buildings vs. floor area vs. emissions (2023)"}
+ggplot(shares_long, aes(property_type, share, fill = measure)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75) +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Share of buildings" = "grey70",
+                               "Share of floor area" = asu_gold,
+                               "Share of emissions" = asu_maroon), name = NULL) +
+  labs(title = "A few big property types punch above their weight on emissions",
+       subtitle = "Six property types with the largest emissions, 2023 reporting year",
+       x = NULL, y = "Share of all reporting buildings") +
+  theme_minimal(base_size = 13) + theme(legend.position = "bottom")
+```
+
+**Evidence and interpretation:** Multifamily housing is about
+`r percent(get_share("Multifamily Housing", "buildings"), accuracy = 1)` of
+buildings in 2023 but only
+`r percent(get_share("Multifamily Housing", "emissions"), accuracy = 1)` of
+emissions. It is a *large count of relatively efficient, small emitters*. Offices
+are the reverse: about `r percent(get_share("Office", "buildings"), accuracy = 1)`
+of buildings but `r percent(get_share("Office", "emissions"), accuracy = 1)` of
+emissions, because they are physically large. The most striking case is
+**hospitals**: only
+`r percent(get_share("Hospital (General Medical & Surgical)", "buildings"), accuracy = 0.1)`
+of buildings but about
+`r percent(get_share("Hospital (General Medical & Surgical)", "emissions"), accuracy = 1)`
+of emissions. They run 24 hours a day with intensive ventilation and equipment. For a
+policymaker, this means that counting buildings is the wrong way to prioritize.
+A handful of hospitals matter as much as hundreds of apartment buildings.
+
+### The role of fuel
+
+Emissions depend on the *type* of energy, so I also check how much each
+building relies on natural gas.
+
+```{r fig-fuel, fig.cap="Figure 9: Natural gas share of energy use by construction era"}
+analysis %>%
+  filter(!is.na(era), !is.na(gas_share)) %>%
+  ggplot(aes(era, gas_share, fill = era)) +
+  geom_violin(show.legend = FALSE, alpha = 0.85, scale = "width") +
+  stat_summary(fun = median, geom = "point", colour = "white", size = 3) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("#F2D7A0", "#E9B84F", asu_maroon, "#C4622D", grey_dark)) +
+  labs(title = "Newer buildings lean less on natural gas",
+       subtitle = "Distribution of natural gas share of energy use (white dot = median)",
+       x = "Era built", y = "Natural gas share of energy use") +
+  theme_minimal(base_size = 13)
+```
+
+```{r fuel-type}
+analysis %>%
+  filter(property_type %in% major_types, !is.na(gas_share)) %>%
+  group_by(property_type) %>%
+  summarise(median_gas_share = percent(median(gas_share), accuracy = 1),
+            buildings = n(), .groups = "drop") %>%
+  arrange(desc(median_gas_share)) %>%
+  kable(caption = "Median natural gas share by property type")
+```
+
+**What to notice:** The three eras up to 1975 sit highest, and buildings from after
+1975 use a noticeably smaller share of natural gas. By property type, apartment
+buildings and schools run mostly on gas (they need lots of heat and hot water),
+while **offices are much more electric**. Since the grid is getting cleaner
+while gas is a fixed fossil fuel, buildings that depend on gas have less to gain
+from grid improvements, which is a strong argument for **electrification** of
+heating in older housing.
+
+**Answer to Question 4:** Emissions are concentrated in a few large property
+types (offices, hospitals), while multifamily housing contributes far less than
+its share of buildings. Natural gas dependence is highest in older buildings,
+apartments, and schools.
+
+## 3.5 Bonus: where in the city are the energy-hungry buildings?
+
+Neighborhood comparisons are mostly a reflection of which property types are
+located there, but they are still interesting, especially for a data science
+portfolio. Because the data have coordinates, I can build an **interactive map**.
+Hover over a point to see the building's details.
+
+```{r interactive-map, fig.height=6.5, fig.cap="Figure 10 (interactive): Energy intensity of buildings across Chicago, 2023"}
+map_df <- analysis %>%
+  filter(year == 2023, !is.na(lat), !is.na(lon),
+         lat > 41.6, lat < 42.1, lon > -88, lon < -87.5) %>%
+  mutate(eui_capped = pmin(site_eui, 200),
+         tip = paste0(coalesce(property_name, "Unnamed building"),
+                      "<br>Type: ", property_type,
+                      "<br>Site EUI: ", round(site_eui, 1),
+                      "<br>Neighborhood: ", str_to_title(community_area)))
+
+p_map <- ggplot(map_df, aes(lon, lat, colour = eui_capped, text = tip)) +
+  geom_point(size = 1.4, alpha = 0.75) +
+  scale_colour_viridis_c(option = "magma", direction = -1,
+                         name = "Site EUI\n(capped at 200)") +
+  coord_fixed(ratio = 1.3) +
+  labs(title = "Chicago's large buildings by energy intensity (2023)",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal(base_size = 12)
+
+ggplotly(p_map, tooltip = "text")
+```
+
+**What to notice:** Each dot is a building, so the map traces the shape of the
+city: the dense downtown cluster (the Loop and the near north and west sides),
+the lakefront, and scattered buildings across the neighborhoods. Hover over any
+point to inspect that building. The chart below ranks neighborhoods by median
+EUI to make the geographic pattern easier to read.
+
+```{r fig-neighborhood, fig.cap="Figure 11: Neighborhoods with the lowest and highest median EUI"}
+hood <- analysis %>%
+  filter(year >= 2020) %>%
+  group_by(community_area) %>%
+  summarise(n = n(), median_eui = median(site_eui), .groups = "drop") %>%
+  filter(n >= 60)
+
+bind_rows(slice_min(hood, median_eui, n = 5), slice_max(hood, median_eui, n = 5)) %>%
+  mutate(group = if_else(median_eui <= median(hood$median_eui), "Lowest", "Highest"),
+         area = fct_reorder(str_to_title(community_area), median_eui)) %>%
+  ggplot(aes(area, median_eui, fill = group)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = round(median_eui, 0)), hjust = -0.2, fontface = "bold") +
+  coord_flip() +
+  scale_fill_manual(values = c("Lowest" = "#2E7D9A", "Highest" = asu_maroon), name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Neighborhood medians differ widely",
+       subtitle = "Community areas with at least 60 building-years of data, 2020-2023",
+       x = NULL, y = "Median site EUI (kBtu per sq ft)") +
+  theme_minimal(base_size = 13) + theme(legend.position = "bottom")
+```
+
+The neighborhoods with the **lowest** median EUI include O'Hare, the Near West
+Side and the Loop, which have many offices and commercial buildings. The
+**highest** include several South Side community areas. I would expect this
+to reflect property type and age (offices are efficient per square foot, while
+older housing is not), but I did not test that here, and I do not claim that
+neighborhood *causes* the difference. It does, however, raise an equity
+question worth future study: older housing in some communities may carry higher
+energy costs for the residents who live there.
+
+## 3.6 Sanity check: do the efficiency ratings agree with EUI?
+
+As a validation of the data (and a sanity check on my cleaning), I check that
+the city's own ratings behave sensibly. Higher ratings should go with lower
+energy use.
+
+```{r rating-check}
+analysis %>%
+  filter(!is.na(chicago_rating)) %>%
+  group_by(`Chicago Energy Rating (stars)` = chicago_rating) %>%
+  summarise(buildings = n(), `Median EUI` = round(median(site_eui), 1), .groups = "drop") %>%
+  kable(caption = "Median EUI by Chicago Energy Rating")
+
+cat("Correlation between ENERGY STAR score and site EUI:",
+    round(cor(analysis$energy_star, analysis$site_eui, use = "complete.obs"), 2), "\n")
+```
+
+The pattern is clean and monotone: the more stars a building has, the lower its
+median EUI, and the ENERGY STAR score has a clear negative correlation with EUI.
+That tells me my cleaning did not break anything and that EUI is a meaningful
+measure of performance.
+
+# 4. Final Conclusions
+
+## 4.1 Answers to my research questions
+
+* **Q1 - Progress:** Chicago's large buildings really did become less energy
+  intensive. The median site EUI went from about
+  `r round(get_y("median_eui", 2018), 1)` in 2018 to
+  `r round(get_y("median_eui", 2023), 1)` in 2023, and, more convincingly,
+  `r percent(panel_pct, accuracy = 1)` of the `r comma(panel_n)` buildings that
+  reported in both 2016 and 2023 improved. The gain is not just an illusion
+  created by changes in who reports. But it is not a smooth, steady trend
+  either, because most of the decline arrives as a **step in 2020**, which
+  points to the pandemic as a major contributor.
+* **Q2 - Age:** Age alone does not predict energy waste. The overall correlation
+  is nearly zero (`r round(cor_age, 3)`) and the real pattern is U-shaped:
+  buildings from **1946 to 1975** are the least efficient, while pre-war
+  buildings and post-2000 buildings do better. The result holds inside
+  multifamily and office buildings, so it is not just an artifact of building mix.
+* **Q3 - COVID-19:** The pandemic hit property types very differently. Offices
+  dropped to roughly `r idx("Office", 2020)` on a 2019 = 100 scale and were still
+  at about `r idx("Office", 2023)` in 2023, a lasting change. Hotels fell to about
+  `r idx("Hotel", 2020)` and then partly rebounded (to about `r idx("Hotel", 2023)`). Schools hardly changed.
+* **Q4 - Emissions:** Emissions are concentrated in a few property types.
+  Offices produce roughly twice their share of buildings in emissions, and
+  hospitals are a tiny share of buildings but a large share of emissions.
+  Multifamily housing is the opposite: lots of buildings, comparatively smaller
+  emissions per building.
+
+## 4.2 What the patterns mean
+
+* **Not every drop in energy use is an efficiency win.** An office that is
+  half empty uses less energy per square foot, but it is not a better building.
+  Policymakers who read EUI trends as proof that retrofits are working could be
+  misled.
+* **Cleaner emissions are partly a gift from the power grid.** Greenhouse gas
+  intensity fell faster than energy intensity, which is consistent with a cleaner
+  electricity supply. Building owners are getting credit for some changes they
+  did not make.
+* **Mid-century buildings are the best retrofit target.** The 1946-1975 group
+  has the highest energy intensity in nearly every comparison and also the
+  heaviest natural gas use. Programs that target these buildings are likely to
+  produce the biggest savings per dollar.
+* **Prioritize by emissions, not by building count.** A small number of
+  large facilities, such as hospitals and big offices, account for a share of
+  emissions far above their share of the building stock.
+* **Electrification matters for housing.** Apartment buildings and schools rely
+  mostly on natural gas, while offices are more electric. As the grid keeps
+  getting cleaner, switching heating from gas to electricity becomes one of the
+  largest available levers, especially in older buildings.
+* **The data themselves tell a story about compliance.** Starting in 2018, a
+  visible share of covered buildings did not submit or were exempt, so the
+  picture of "Chicago's buildings" is really a picture of *the buildings that
+  reported*. Better enforcement would improve every conclusion above.
+* **Cleaning was not busywork.** Merging two inconsistent status labels,
+  fixing neighborhood capitalization, and removing a handful of absurd EUI
+  values changed what the data could say. Without those steps, two whole years
+  of data (2020 and 2022) would have disappeared and a few extreme values would
+  have distorted every average.
+
+## 4.3 Limitations
+
+* **Selection bias:** Only buildings that report are included, and reporting
+  rates changed over time. The improvement I measured may be different for
+  non-reporting buildings.
+* **Pandemic confounding:** Because the 2020 drop coincides with COVID, I cannot
+  fully separate genuine efficiency from reduced use. A longer post-pandemic
+  record would help.
+* **Correlation, not causation:** I observe patterns by era, type, and
+  neighborhood, but I cannot prove why they occur (for example, I do not have
+  data on insulation, window types, or renovations).
+* **EUI is not perfect:** It is energy per square foot, so it ignores how many
+  people use the building and what it is used for. It also depends on how
+  accurately owners report floor area.
+* **Outlier handling is a judgment call:** I excluded EUI above 500. A different
+  threshold would change the numbers slightly, though I used medians to reduce
+  sensitivity.
+* **Small groups:** Some eras and property types have few observations, so their
+  medians are less certain (visible as small points in Figure 6).
+* **Grid explanation is a hypothesis:** The data contain no information about
+  the electricity supply, so my explanation for faster emissions declines is
+  informed speculation.
+
+## 4.4 Possible explanations and ideas for future work
+
+* **Test the grid hypothesis:** Add regional grid emissions factors by year and
+  calculate emissions *as if* the grid had stayed the same, to see how much of
+  the emissions decline buildings are responsible for.
+* **Model the drivers of EUI:** Build a regression (or a random forest) with
+  property type, era, size, fuel mix, and neighborhood to see which factors
+  matter most after controlling for the others.
+* **Follow the pandemic more carefully:** Compare the same buildings in
+  2019, 2020, and 2023 within each property type, and test whether offices that
+  had higher pre-pandemic occupancy fell further.
+* **Add equity data:** Join neighborhood income or demographic data to see
+  whether less efficient housing is concentrated in lower-income areas.
+* **Study compliance:** Investigate which buildings stop reporting, and whether
+  they are systematically larger, older, or less efficient than those that report.
+* **Evaluate retrofit programs:** If upgrade records are available, compare
+  buildings that received retrofits with similar buildings that did not.
+
+*Thanks for reading! If you ever find yourself in a half-empty Loop office
+building in January, remember: it is still heated, and it still shows up in the
+data.*
+
+<!-- Fun idea for the presentation: add a meme (e.g., "Distracted Boyfriend" with
+     'Hospital emissions' and 'Apartment buildings') or a Chicago skyline photo here. -->
+
+# Appendix: Session Information
+
+```{r session}
+sessionInfo()
+```
